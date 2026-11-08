@@ -82,3 +82,39 @@ def test_chat_rejects_null_message():
     )
 
     assert response.status_code == 422
+
+
+def test_home_response_schema():
+    response = client.get("/openapi.json")
+    schema = response.json()
+
+    home_schema = (
+        schema["paths"]["/"]["get"]["responses"]
+        ["200"]["content"]["application/json"]["schema"]
+    )
+
+    assert home_schema["$ref"] == "#/components/schemas/HomeResponse"
+
+
+def test_health_response_schema():
+    response = client.get("/openapi.json")
+    schema = response.json()
+
+    health_schema = (
+        schema["paths"]["/health"]["get"]["responses"]
+        ["200"]["content"]["application/json"]["schema"]
+    )
+
+    assert health_schema["$ref"] == "#/components/schemas/HealthResponse"
+
+
+def test_chat_response_schema():
+    response = client.get("/openapi.json")
+    schema = response.json()
+
+    chat_schema = (
+        schema["paths"]["/chat"]["post"]["responses"]
+        ["200"]["content"]["application/json"]["schema"]
+    )
+
+    assert chat_schema["$ref"] == "#/components/schemas/ChatResponse"

@@ -1,10 +1,11 @@
+
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 
 
-# Initialise CLEO
+# CLEO application
 app = FastAPI(
     title="CLEO",
     description="Cognitive Logic & Executive Operator",
@@ -12,7 +13,7 @@ app = FastAPI(
 )
 
 
-# Chat request model
+# Incoming chat request structure
 class ChatRequest(BaseModel):
     message: str = Field(
         min_length=1,
@@ -31,6 +32,21 @@ class ChatRequest(BaseModel):
         return value
 
 
+# Standard chat response structure
+# Home response model
+class HomeResponse(BaseModel):
+    assistant: str
+    message: str
+    version: str
+
+
+# Health response model
+class HealthResponse(BaseModel):
+    status: str
+    assistant: str
+    timestamp: datetime
+
+
 # Chat response model
 class ChatResponse(BaseModel):
     assistant: str
@@ -38,7 +54,8 @@ class ChatResponse(BaseModel):
     response: str
 
 
-@app.get("/")
+# Homepage
+@app.get("/", response_model=HomeResponse)
 async def home():
     return {
         "assistant": "CLEO",
@@ -47,7 +64,8 @@ async def home():
     }
 
 
-@app.get("/health")
+# Health check
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     return {
         "status": "operational",
@@ -56,6 +74,7 @@ async def health_check():
     }
 
 
+# Chat endpoint
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     return ChatResponse(
