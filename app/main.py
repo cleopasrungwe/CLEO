@@ -13,8 +13,11 @@ from pydantic import BaseModel, Field, field_validator
 
 
 # CLEO logging configuration
+from app.core.config import settings
+
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, settings.LOG_LEVEL),
     format=(
         "%(asctime)s | %(levelname)s | "
         "%(name)s | %(message)s"
@@ -36,9 +39,9 @@ async def lifespan(app: FastAPI):
 
 # CLEO application
 app = FastAPI(
-    title="CLEO",
-    description="Cognitive Logic & Executive Operator",
-    version="0.1.0",
+    title=settings.APP_NAME,
+    description=settings.APP_DESCRIPTION,
+    version=settings.APP_VERSION,
     lifespan=lifespan,
 )
 
