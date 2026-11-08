@@ -1,7 +1,9 @@
 
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -53,6 +55,46 @@ class ChatResponse(BaseModel):
     received_message: str
     response: str
 
+# Standard error response structure
+class ErrorResponse(BaseModel):
+    assistant: str
+    error: str
+    message: str
+
+
+# Handle invalid requests
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+):
+    error_response = ErrorResponse(
+        assistant="CLEO",
+        error="validation_error",
+        message="Request validation failed. Check your input and try again.",
+    )
+
+    return JSONResponse(
+        status_code=422,
+        content=error_response.model_dump(),
+    )
+
+# Handle unexpected server errors
+@app.exception_handler(Exception)
+async def unexpected_exception_handler(
+    request: Request,
+    exc: Exception,
+):
+    error_response = ErrorResponse(
+        assistant="CLEO",
+        error="internal_server_error",
+        message="An unexpected error occurred. Please try again later.",
+    )
+
+    return JSONResponse(
+        status_code=500,
+        content=error_response.model_dump(),
+    )
 
 # Homepage
 @app.get("/", response_model=HomeResponse)
@@ -75,7 +117,20 @@ async def health_check():
 
 
 # Chat endpoint
-@app.post("/chat", response_model=ChatResponse)
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    responses={
+        422: {
+            "model": ErrorResponse,
+            "description": "Request validation failed",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Unexpected server error",
+        },
+    },
+)
 async def chat(request: ChatRequest):
     return ChatResponse(
         assistant="CLEO",
