@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -19,6 +21,7 @@ def test_home_endpoint():
     }
 
 
+
 def test_health_endpoint():
     response = client.get("/health")
 
@@ -29,6 +32,7 @@ def test_health_endpoint():
     assert data["status"] == "operational"
     assert data["assistant"] == "CLEO"
     assert datetime.fromisoformat(data["timestamp"])
+
 
 
 def test_chat_endpoint():
@@ -42,6 +46,7 @@ def test_chat_endpoint():
     assert response.json()["received_message"] == "Hello CLEO"
 
 
+
 def test_chat_rejects_empty_message():
     response = client.post(
         "/chat",
@@ -49,6 +54,8 @@ def test_chat_rejects_empty_message():
     )
 
     assert response.status_code == 422
+
+
 
 def test_chat_returns_structured_validation_error():
     response = client.post(
@@ -66,6 +73,7 @@ def test_chat_returns_structured_validation_error():
     }
 
 
+
 def test_chat_returns_structured_error_for_whitespace():
     response = client.post(
         "/chat",
@@ -76,6 +84,8 @@ def test_chat_returns_structured_error_for_whitespace():
     assert response.json()["assistant"] == "CLEO"
     assert response.json()["error"] == "validation_error"
 
+
+
 def test_chat_rejects_whitespace_message():
     response = client.post(
         "/chat",
@@ -83,6 +93,7 @@ def test_chat_rejects_whitespace_message():
     )
 
     assert response.status_code == 422
+
 
 
 def test_chat_rejects_message_over_2000_characters():
@@ -94,10 +105,12 @@ def test_chat_rejects_message_over_2000_characters():
     assert response.status_code == 422
 
 
+
 def test_chat_rejects_missing_message():
     response = client.post("/chat", json={})
 
     assert response.status_code == 422
+
 
 
 def test_chat_rejects_null_message():
@@ -107,6 +120,7 @@ def test_chat_rejects_null_message():
     )
 
     assert response.status_code == 422
+
 
 
 def test_home_response_schema():
@@ -121,6 +135,7 @@ def test_home_response_schema():
     assert home_schema["$ref"] == "#/components/schemas/HomeResponse"
 
 
+
 def test_health_response_schema():
     response = client.get("/openapi.json")
     schema = response.json()
@@ -131,6 +146,7 @@ def test_health_response_schema():
     )
 
     assert health_schema["$ref"] == "#/components/schemas/HealthResponse"
+
 
 
 def test_chat_response_schema():
@@ -155,6 +171,8 @@ def test_chat_response_schema():
         ["500"]["content"]["application/json"]["schema"]["$ref"]
         == "#/components/schemas/ErrorResponse"
     )
+
+
 
 def test_unexpected_errors_return_structured_response():
     test_app = FastAPI()
@@ -186,3 +204,34 @@ def test_unexpected_errors_return_structured_response():
     }
 
     assert "Sensitive internal details" not in response.text
+
+def test_responses_include_request_id():
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert "X-Request-ID" in response.headers
+    assert response.headers["X-Request-ID"]
+
+
+def test_each_request_has_a_unique_request_id():
+    first_response = client.get("/")
+    second_response = client.get("/health")
+
+    first_id = first_response.headers["X-Request-ID"]
+    second_id = second_response.headers["X-Request-ID"]
+
+    assert first_id != second_id
+
+
+def test_requests_are_recorded_in_logs(caplog):
+    with caplog.at_level(logging.INFO, logger="cleo"):
+        response = client.get("/health")
+
+    assert response.status_code == 200
+
+    assert any(
+        "Request completed" in record.message
+        and "/health" in record.message
+        and "Status: 200" in record.message
+        for record in caplog.records
+    )

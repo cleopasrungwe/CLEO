@@ -1,4 +1,9 @@
 
+import logging
+import time
+import uuid
+
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
@@ -7,12 +12,77 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 
+# CLEO logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format=(
+        "%(asctime)s | %(levelname)s | "
+        "%(name)s | %(message)s"
+    ),
+)
+
+logger = logging.getLogger("cleo")
+
+
+# CLEO application lifecycle
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("CLEO backend starting up")
+
+    yield
+
+    logger.info("CLEO backend shutting down")
+
+
 # CLEO application
 app = FastAPI(
     title="CLEO",
     description="Cognitive Logic & Executive Operator",
     version="0.1.0",
+    lifespan=lifespan,
 )
+
+
+# HTTP request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+
+    start_time = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+
+        duration = time.perf_counter() - start_time
+
+        response.headers["X-Request-ID"] = request_id
+
+        logger.info(
+            "Request completed | ID: %s | Method: %s | "
+            "Path: %s | Status: %s | Duration: %.4f seconds",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration,
+        )
+
+        return response
+
+    except Exception:
+        duration = time.perf_counter() - start_time
+
+        logger.error(
+            "Request processing failed | ID: %s | Method: %s | "
+            "Path: %s | Duration: %.4f seconds",
+            request_id,
+            request.method,
+            request.url.path,
+            duration,
+        )
+
+        raise
 
 
 # Incoming chat request structure
@@ -34,26 +104,24 @@ class ChatRequest(BaseModel):
         return value
 
 
-# Standard chat response structure
-# Home response model
+# Response models
 class HomeResponse(BaseModel):
     assistant: str
     message: str
     version: str
 
 
-# Health response model
 class HealthResponse(BaseModel):
     status: str
     assistant: str
     timestamp: datetime
 
 
-# Chat response model
 class ChatResponse(BaseModel):
     assistant: str
     received_message: str
     response: str
+
 
 # Standard error response structure
 class ErrorResponse(BaseModel):
@@ -68,6 +136,11 @@ async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ):
+    logger.warning(
+        "Request validation failed | Request ID: %s",
+        getattr(request.state, "request_id", "unknown"),
+    )
+
     error_response = ErrorResponse(
         assistant="CLEO",
         error="validation_error",
@@ -79,12 +152,24 @@ async def validation_exception_handler(
         content=error_response.model_dump(),
     )
 
+
 # Handle unexpected server errors
 @app.exception_handler(Exception)
 async def unexpected_exception_handler(
     request: Request,
     exc: Exception,
 ):
+    request_id = getattr(
+        request.state,
+        "request_id",
+        "unknown",
+    )
+
+    logger.exception(
+        "Unhandled application exception | Request ID: %s",
+        request_id,
+    )
+
     error_response = ErrorResponse(
         assistant="CLEO",
         error="internal_server_error",
@@ -94,7 +179,11 @@ async def unexpected_exception_handler(
     return JSONResponse(
         status_code=500,
         content=error_response.model_dump(),
+        headers={
+            "X-Request-ID": request_id,
+        },
     )
+
 
 # Homepage
 @app.get("/", response_model=HomeResponse)
