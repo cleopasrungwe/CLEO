@@ -1,4 +1,3 @@
-
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,6 +25,9 @@ class Settings(BaseSettings):
         "ERROR",
         "CRITICAL",
     ] = "INFO"
+
+    # Database configuration
+    DATABASE_URL: str = "sqlite:///./cleo.db"
 
     model_config = SettingsConfigDict(
         env_file=".env",

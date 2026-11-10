@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field, field_validator
 
 # CLEO logging configuration
 from app.core.config import settings
+from app.core.database import Base, engine
+from app.models import Conversation, Message
 
 
 logging.basicConfig(
@@ -31,6 +33,11 @@ logger = logging.getLogger("cleo")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("CLEO backend starting up")
+
+    # Initialize database tables
+    Base.metadata.create_all(bind=engine)
+
+    logger.info("CLEO database initialized successfully")
 
     yield
 
