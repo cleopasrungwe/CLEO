@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import Base, engine, get_db
 from app.models import Conversation, Message
+from app.services.ai.factory import create_ai_provider
 
 
 logging.basicConfig(
@@ -229,42 +230,88 @@ async def chat(
         db.add(conversation)
         db.flush()
 
-    # Save the user's message
+    # Retrieve previous messages from this conversation
+    previous_messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.id.asc())
+        .all()
+    )
+
+    # Convert saved messages into the format expected by AI providers
+    conversation_history = [
+        {
+            "role": message.role,
+            "content": message.content,
+        }
+        for message in previous_messages
+    ]
+
+    # Add the current user message to the AI conversation history
+    conversation_history.append({
+        "role": "user",
+        "content": request.message,
+    })
+
+    # Generate a response using the configured AI provider
+    provider = None
+
+    try:
+        provider = create_ai_provider()
+
+        assistant_response = await provider.generate_response(
+            conversation_history
+        )
+
+    except Exception:
+        db.rollback()
+
+        logger.exception(
+            "AI provider failed to generate a response"
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "CLEO's AI service is currently unavailable. "
+                "Please try again later."
+            ),
+        )
+
+    finally:
+        if provider is not None:
+            await provider.close()
+
+        # Save the user's message
     user_message = Message(
         conversation_id=conversation.id,
         role="user",
         content=request.message,
     )
 
-    # Temporary assistant response until the AI engine is connected
-    assistant_response = (
-        "I have received your instruction. "
-        "My AI engine is not connected yet."
-    )
-
+    # Save CLEO's response
     assistant_message = Message(
         conversation_id=conversation.id,
         role="assistant",
         content=assistant_response,
     )
 
-    db.add_all([
-        user_message,
-        assistant_message,
-    ])
+    db.add_all([user_message, assistant_message])
 
-    # Update the conversation's last activity time
+    # Update the conversation timestamp
     conversation.updated_at = datetime.now(timezone.utc)
 
-    # Commit both messages to the database
+    # Save everything to the database
     db.commit()
 
+    # Return the chat response
     return ChatResponse(
         assistant="CLEO",
         conversation_id=conversation.id,
         received_message=request.message,
         response=assistant_response,
     )
+
 
 
 # Standard error response structure

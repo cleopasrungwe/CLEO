@@ -5,11 +5,40 @@ import logging
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import pytest
+
+
 from app.main import app, unexpected_exception_handler
+
+
+
+class FakeAIProvider:
+    """Fake AI provider for automated tests."""
+
+    async def generate_response(
+        self,
+        messages: list[dict[str, str]],
+    ) -> str:
+        latest_message = messages[-1]["content"]
+        return f"CLEO test response to: {latest_message}"
+
+    async def close(self):
+        pass
+
+
+
+@pytest.fixture(autouse=True)
+def mock_ai_provider(monkeypatch):
+    """Replace the real AI provider during every test."""
+
+    monkeypatch.setattr(
+        "app.main.create_ai_provider",
+        lambda: FakeAIProvider(),
+    )
+
 
 client = TestClient(app)
 
-import pytest
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -496,3 +525,35 @@ def test_delete_conversation_also_deletes_messages(test_database):
 
     finally:
         db.close()
+
+
+
+def test_chat_ai_failure_rolls_back_new_conversation(
+    test_database,
+    monkeypatch,
+):
+    """A failed AI request must not leave an empty conversation."""
+
+    class FailingAIProvider:
+        async def generate_response(self, message: str) -> str:
+            raise RuntimeError("Simulated AI service failure")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "app.main.create_ai_provider",
+        lambda: FailingAIProvider(),
+    )
+
+    response = client.post(
+        "/chat",
+        json={"message": "Test AI failure"},
+    )
+
+    # CLEO should report that its AI service is unavailable.
+    assert response.status_code == 503
+
+    # The failed request should not leave a conversation in the database.
+    with test_database() as db:
+        assert db.query(Conversation).count() == 0
