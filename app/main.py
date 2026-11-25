@@ -6,15 +6,16 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy.orm import Session
 
 
 # CLEO logging configuration
 from app.core.config import settings
-from app.core.database import Base, engine
+from app.core.database import Base, engine, get_db
 from app.models import Conversation, Message
 
 
@@ -103,6 +104,12 @@ class ChatRequest(BaseModel):
         description="The message sent to CLEO",
     )
 
+    conversation_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Existing conversation ID, if continuing a conversation",
+    )
+
     @field_validator("message")
     @classmethod
     def message_must_not_be_blank(cls, value: str) -> str:
@@ -126,11 +133,119 @@ class HealthResponse(BaseModel):
     assistant: str
     timestamp: datetime
 
-
 class ChatResponse(BaseModel):
     assistant: str
+    conversation_id: int
     received_message: str
     response: str
+
+
+class ErrorResponse(BaseModel):
+    assistant: str
+    error: str
+    message: str
+
+class ConversationSummary(BaseModel):
+    id: int
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MessageHistoryItem(BaseModel):
+    id: int
+    role: str
+    content: str
+    created_at: datetime
+
+
+class ConversationHistoryResponse(BaseModel):
+    id: int
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+    messages: list[MessageHistoryItem]
+
+
+# Chat endpoint
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    responses={
+        422: {
+            "model": ErrorResponse,
+            "description": "Request validation failed",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Unexpected server error",
+        },
+    },
+)
+async def chat(
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+):
+    # Find an existing conversation or create a new one
+    if request.conversation_id is not None:
+        conversation = (
+            db.query(Conversation)
+            .filter(
+                Conversation.id == request.conversation_id
+            )
+            .first()
+        )
+
+        if conversation is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Conversation not found.",
+            )
+
+    else:
+        conversation = Conversation(
+            title=request.message[:200],
+        )
+
+        db.add(conversation)
+        db.flush()
+
+    # Save the user's message
+    user_message = Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=request.message,
+    )
+
+    # Temporary assistant response until the AI engine is connected
+    assistant_response = (
+        "I have received your instruction. "
+        "My AI engine is not connected yet."
+    )
+
+    assistant_message = Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=assistant_response,
+    )
+
+    db.add_all([
+        user_message,
+        assistant_message,
+    ])
+
+    # Update the conversation's last activity time
+    conversation.updated_at = datetime.now(timezone.utc)
+
+    # Commit both messages to the database
+    db.commit()
+
+    return ChatResponse(
+        assistant="CLEO",
+        conversation_id=conversation.id,
+        received_message=request.message,
+        response=assistant_response,
+    )
 
 
 # Standard error response structure
@@ -214,28 +329,58 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
-
-# Chat endpoint
-@app.post(
-    "/chat",
-    response_model=ChatResponse,
-    responses={
-        422: {
-            "model": ErrorResponse,
-            "description": "Request validation failed",
-        },
-        500: {
-            "model": ErrorResponse,
-            "description": "Unexpected server error",
-        },
-    },
+# List all saved conversations
+@app.get(
+    "/conversations",
+    response_model=list[ConversationSummary],
 )
-async def chat(request: ChatRequest):
-    return ChatResponse(
-        assistant="CLEO",
-        received_message=request.message,
-        response=(
-            "I have received your instruction. "
-            "My AI engine is not connected yet."
-        ),
+async def list_conversations(
+    db: Session = Depends(get_db),
+):
+    conversations = (
+        db.query(Conversation)
+        .order_by(Conversation.updated_at.desc())
+        .all()
     )
+
+    return conversations
+
+
+# Retrieve one conversation and its messages
+@app.get(
+    "/conversations/{conversation_id}",
+    response_model=ConversationHistoryResponse,
+)
+async def get_conversation(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == conversation_id)
+        .first()
+    )
+
+    if conversation is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.id.asc())
+        .all()
+    )
+
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+        "messages": messages,
+    }
+
+
+

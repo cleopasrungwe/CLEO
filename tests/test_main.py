@@ -9,6 +9,47 @@ from app.main import app, unexpected_exception_handler
 
 client = TestClient(app)
 
+import pytest
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.core.database import Base, get_db
+from app.models import Conversation, Message
+
+@pytest.fixture
+def test_database():
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    Base.metadata.create_all(bind=test_engine)
+
+    TestingSessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=test_engine,
+    )
+
+    def override_get_db():
+        db = TestingSessionLocal()
+
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    yield TestingSessionLocal
+
+    app.dependency_overrides.clear()
+    Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
+
 
 def test_home_endpoint():
     response = client.get("/")
@@ -35,17 +76,85 @@ def test_health_endpoint():
 
 
 
-def test_chat_endpoint():
+def test_chat_endpoint(test_database):
     response = client.post(
         "/chat",
         json={"message": "Hello CLEO"},
     )
 
     assert response.status_code == 200
-    assert response.json()["assistant"] == "CLEO"
-    assert response.json()["received_message"] == "Hello CLEO"
+
+    data = response.json()
+
+    assert data["assistant"] == "CLEO"
+    assert data["received_message"] == "Hello CLEO"
+    assert data["conversation_id"] is not None
+
+def test_chat_messages_are_saved_to_database(test_database):
+    response = client.post(
+        "/chat",
+        json={"message": "Remember this message"},
+    )
+
+    assert response.status_code == 200
+
+    conversation_id = response.json()["conversation_id"]
+
+    db = test_database()
+
+    try:
+        conversation = db.query(Conversation).filter(
+            Conversation.id == conversation_id
+        ).first()
+
+        messages = db.query(Message).filter(
+            Message.conversation_id == conversation_id
+        ).order_by(Message.id).all()
+
+        assert conversation is not None
+        assert conversation.title == "Remember this message"
+
+        assert len(messages) == 2
+        assert messages[0].role == "user"
+        assert messages[0].content == "Remember this message"
+        assert messages[1].role == "assistant"
+
+    finally:
+        db.close()
 
 
+def test_chat_can_continue_existing_conversation(test_database):
+    first_response = client.post(
+        "/chat",
+        json={"message": "Hello CLEO"},
+    )
+
+    conversation_id = first_response.json()["conversation_id"]
+
+    second_response = client.post(
+        "/chat",
+        json={
+            "message": "How are you?",
+            "conversation_id": conversation_id,
+        },
+    )
+
+    assert second_response.status_code == 200
+    assert second_response.json()["conversation_id"] == conversation_id
+
+    db = test_database()
+
+    try:
+        messages = db.query(Message).filter(
+            Message.conversation_id == conversation_id
+        ).order_by(Message.id).all()
+
+        assert len(messages) == 4
+        assert messages[0].content == "Hello CLEO"
+        assert messages[2].content == "How are you?"
+
+    finally:
+        db.close()
 
 def test_chat_rejects_empty_message():
     response = client.post(
@@ -235,3 +344,50 @@ def test_requests_are_recorded_in_logs(caplog):
         and "Status: 200" in record.message
         for record in caplog.records
     )
+
+
+
+def test_list_conversations(test_database):
+    client.post(
+        "/chat",
+        json={"message": "First conversation"},
+    )
+
+    response = client.get("/conversations")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert len(data) == 1
+    assert data[0]["title"] == "First conversation"
+
+
+def test_get_conversation_history(test_database):
+    chat_response = client.post(
+        "/chat",
+        json={"message": "Hello CLEO"},
+    )
+
+    conversation_id = chat_response.json()["conversation_id"]
+
+    response = client.get(
+        f"/conversations/{conversation_id}"
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == conversation_id
+    assert len(data["messages"]) == 2
+    assert data["messages"][0]["role"] == "user"
+    assert data["messages"][0]["content"] == "Hello CLEO"
+    assert data["messages"][1]["role"] == "assistant"
+
+
+def test_get_nonexistent_conversation(test_database):
+    response = client.get("/conversations/99999")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Conversation not found."
