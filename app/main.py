@@ -121,6 +121,25 @@ class ChatRequest(BaseModel):
         return value
 
 
+# Incoming conversation rename request
+class RenameConversationRequest(BaseModel):
+    title: str = Field(
+        min_length=1,
+        max_length=200,
+        description="The new conversation title",
+    )
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+
+        if not value:
+            raise ValueError("Conversation title cannot be empty.")
+
+        return value
+
+
 # Response models
 class HomeResponse(BaseModel):
     assistant: str
@@ -346,6 +365,7 @@ async def list_conversations(
     return conversations
 
 
+
 # Retrieve one conversation and its messages
 @app.get(
     "/conversations/{conversation_id}",
@@ -383,4 +403,60 @@ async def get_conversation(
     }
 
 
+# Rename an existing conversation
+@app.patch(
+    "/conversations/{conversation_id}",
+    response_model=ConversationSummary,
+)
+async def rename_conversation(
+    conversation_id: int,
+    request: RenameConversationRequest,
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == conversation_id)
+        .first()
+    )
 
+    if conversation is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    conversation.title = request.title
+    conversation.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(conversation)
+
+    return conversation
+
+
+# Delete an existing conversation
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+):
+    conversation = (
+        db.query(Conversation)
+        .filter(Conversation.id == conversation_id)
+        .first()
+    )
+
+    if conversation is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    db.delete(conversation)
+    db.commit()
+
+    return {
+        "assistant": "CLEO",
+        "message": "Conversation deleted successfully.",
+        "conversation_id": conversation_id,
+    }

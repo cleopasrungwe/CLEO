@@ -391,3 +391,108 @@ def test_get_nonexistent_conversation(test_database):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Conversation not found."
+
+
+def test_rename_conversation(test_database):
+    # Create a conversation
+    response = client.post(
+        "/chat",
+        json={"message": "Original conversation"},
+    )
+
+    conversation_id = response.json()["conversation_id"]
+
+    # Rename the conversation
+    rename_response = client.patch(
+        f"/conversations/{conversation_id}",
+        json={"title": "My New Conversation"},
+    )
+
+    assert rename_response.status_code == 200
+    assert rename_response.json()["title"] == "My New Conversation"
+
+
+def test_rename_nonexistent_conversation(test_database):
+    response = client.patch(
+        "/conversations/99999",
+        json={"title": "New Title"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_rename_conversation_rejects_blank_title(test_database):
+    chat_response = client.post(
+        "/chat",
+        json={"message": "Test conversation"},
+    )
+
+    conversation_id = chat_response.json()["conversation_id"]
+
+    response = client.patch(
+        f"/conversations/{conversation_id}",
+        json={"title": "   "},
+    )
+
+    assert response.status_code == 422
+
+
+
+def test_delete_conversation(test_database):
+    chat_response = client.post(
+        "/chat",
+        json={"message": "Conversation to delete"},
+    )
+
+    conversation_id = chat_response.json()["conversation_id"]
+
+    response = client.delete(
+        f"/conversations/{conversation_id}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["conversation_id"] == conversation_id
+
+    history_response = client.get(
+        f"/conversations/{conversation_id}"
+    )
+
+    assert history_response.status_code == 404
+
+
+def test_delete_nonexistent_conversation(test_database):
+    response = client.delete("/conversations/99999")
+
+    assert response.status_code == 404
+
+
+def test_delete_conversation_also_deletes_messages(test_database):
+    chat_response = client.post(
+        "/chat",
+        json={"message": "Delete my messages too"},
+    )
+
+    conversation_id = chat_response.json()["conversation_id"]
+
+    response = client.delete(
+        f"/conversations/{conversation_id}"
+    )
+
+    assert response.status_code == 200
+
+    db = test_database()
+
+    try:
+        conversation = db.query(Conversation).filter(
+            Conversation.id == conversation_id
+        ).first()
+
+        messages = db.query(Message).filter(
+            Message.conversation_id == conversation_id
+        ).all()
+
+        assert conversation is None
+        assert messages == []
+
+    finally:
+        db.close()
