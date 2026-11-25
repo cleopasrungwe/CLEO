@@ -10,7 +10,7 @@ import pytest
 
 from app.main import app, unexpected_exception_handler
 
-
+AI_REQUESTS = []
 
 class FakeAIProvider:
     """Fake AI provider for automated tests."""
@@ -19,9 +19,13 @@ class FakeAIProvider:
         self,
         messages: list[dict[str, str]],
     ) -> str:
+        AI_REQUESTS.append([
+            message.copy() for message in messages
+        ])
+
         latest_message = messages[-1]["content"]
         return f"CLEO test response to: {latest_message}"
-
+    
     async def close(self):
         pass
 
@@ -40,44 +44,9 @@ def mock_ai_provider(monkeypatch):
 client = TestClient(app)
 
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from app.core.prompts import CLEO_SYSTEM_PROMPT
+from app.models import Conversation, Message, Memory
 
-from app.core.database import Base, get_db
-from app.models import Conversation, Message
-
-@pytest.fixture
-def test_database():
-    test_engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-
-    Base.metadata.create_all(bind=test_engine)
-
-    TestingSessionLocal = sessionmaker(
-        autocommit=False,
-        autoflush=False,
-        bind=test_engine,
-    )
-
-    def override_get_db():
-        db = TestingSessionLocal()
-
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    yield TestingSessionLocal
-
-    app.dependency_overrides.clear()
-    Base.metadata.drop_all(bind=test_engine)
-    test_engine.dispose()
 
 
 def test_home_endpoint():
@@ -557,3 +526,199 @@ def test_chat_ai_failure_rolls_back_new_conversation(
     # The failed request should not leave a conversation in the database.
     with test_database() as db:
         assert db.query(Conversation).count() == 0
+
+def test_chat_includes_system_prompt_and_conversation_history(
+    test_database,
+):
+    AI_REQUESTS.clear()
+
+    # Start a new conversation
+    first_response = client.post(
+        "/chat",
+        json={"message": "My name is Alex."},
+    )
+
+    assert first_response.status_code == 200
+
+    conversation_id = first_response.json()["conversation_id"]
+
+    # Continue the same conversation
+    second_response = client.post(
+        "/chat",
+        json={
+            "message": "What is my name?",
+            "conversation_id": conversation_id,
+        },
+    )
+
+    assert second_response.status_code == 200
+
+    # Inspect the messages sent during the second request
+    messages = AI_REQUESTS[-1]
+
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"] == CLEO_SYSTEM_PROMPT
+
+    assert messages[1]["role"] == "user"
+    assert messages[1]["content"] == "My name is Alex."
+
+    assert messages[2]["role"] == "assistant"
+
+    assert messages[3]["role"] == "user"
+    assert messages[3]["content"] == "What is my name?"
+
+def test_chat_saves_explicit_memory(test_database):
+    AI_REQUESTS.clear()
+
+    response = client.post(
+        "/chat",
+        json={
+            "message": "Remember that I like Python."
+        },
+    )
+
+    assert response.status_code == 200
+
+    response_data = response.json()
+
+    assert "I'll remember that: I like Python" in (
+        response_data["response"]
+    )
+
+    # Verify that the memory was saved in the database
+    db = test_database()
+
+    try:
+        memories = db.query(Memory).all()
+
+        assert len(memories) == 1
+        assert memories[0].category == "general"
+        assert memories[0].content == "I like Python"
+
+    finally:
+        db.close()
+
+    # Verify that CLEO did not call the AI provider
+    assert len(AI_REQUESTS) == 0
+
+def test_chat_includes_saved_memories_in_ai_context(test_database):
+    from app.services.memory.service import save_memory
+
+    # Save a memory before starting a new conversation
+    db = test_database()
+
+    try:
+        save_memory(
+            db=db,
+            category="general",
+            content="I like Python.",
+        )
+    finally:
+        db.close()
+
+    AI_REQUESTS.clear()
+
+    # Start a new conversation
+    response = client.post(
+        "/chat",
+        json={
+            "message": "What programming language do I like?"
+        },
+    )
+
+    assert response.status_code == 200
+
+    # Inspect the context sent to the AI provider
+    messages = AI_REQUESTS[-1]
+
+    memory_messages = [
+        message
+        for message in messages
+        if message["role"] == "system"
+        and "USER-APPROVED MEMORIES" in message["content"]
+    ]
+
+    assert len(memory_messages) == 1
+    assert "I like Python." in memory_messages[0]["content"]
+
+def test_list_memories(test_database):
+    from app.services.memory.service import save_memory
+
+    db = test_database()
+
+    try:
+        save_memory(
+            db=db,
+            category="personal",
+            content="I like Python.",
+        )
+
+        save_memory(
+            db=db,
+            category="education",
+            content="I studied Information Technology.",
+        )
+    finally:
+        db.close()
+
+    response = client.get("/memories")
+
+    assert response.status_code == 200
+
+    memories = response.json()
+
+    assert len(memories) == 2
+    assert memories[0]["content"] == (
+        "I studied Information Technology."
+    )
+    assert memories[1]["content"] == "I like Python."
+
+    assert memories[0]["category"] == "education"
+    assert memories[1]["category"] == "personal"
+
+def test_delete_memory_endpoint(test_database):
+    from app.services.memory.service import save_memory
+
+    db = test_database()
+
+    try:
+        memory = save_memory(
+            db=db,
+            category="personal",
+            content="I like Python.",
+        )
+
+        memory_id = memory.id
+
+    finally:
+        db.close()
+
+    response = client.delete(
+        f"/memories/{memory_id}"
+    )
+
+    assert response.status_code == 200
+
+    response_data = response.json()
+
+    assert response_data["assistant"] == "CLEO"
+    assert response_data["message"] == (
+        "Memory deleted successfully."
+    )
+    assert response_data["memory_id"] == memory_id
+
+    # Verify that the memory was actually deleted
+    response = client.get("/memories")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_delete_nonexistent_memory_endpoint():
+    response = client.delete("/memories/99999")
+
+    assert response.status_code == 404
+
+    assert response.json()["detail"] == (
+        "Memory not found."
+    )

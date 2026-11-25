@@ -15,9 +15,16 @@ from sqlalchemy.orm import Session
 
 # CLEO logging configuration
 from app.core.config import settings
+from app.core.prompts import CLEO_SYSTEM_PROMPT
 from app.core.database import Base, engine, get_db
-from app.models import Conversation, Message
+from app.models import Conversation, Message, Memory
 from app.services.ai.factory import create_ai_provider
+from app.services.memory.service import (
+    extract_explicit_memory_request,
+    save_memory,
+    get_all_memories,
+    delete_memory,
+)
 
 
 logging.basicConfig(
@@ -186,6 +193,12 @@ class ConversationHistoryResponse(BaseModel):
     updated_at: datetime
     messages: list[MessageHistoryItem]
 
+class MemoryResponse(BaseModel):
+    id: int
+    category: str
+    content: str
+    created_at: datetime
+    updated_at: datetime
 
 # Chat endpoint
 @app.post(
@@ -238,49 +251,95 @@ async def chat(
         .all()
     )
 
-    # Convert saved messages into the format expected by AI providers
+    # Retrieve user-approved memories
+    saved_memories = get_all_memories(db)
+
+    # Start every AI conversation with CLEO's system instructions
     conversation_history = [
+        {
+            "role": "system",
+            "content": CLEO_SYSTEM_PROMPT,
+        }
+    ]
+
+    # Add saved memories to CLEO's context
+    if saved_memories:
+        memory_context = "\n".join(
+            f"- {memory.content}"
+            for memory in saved_memories
+        )
+
+        conversation_history.append({
+            "role": "system",
+            "content": (
+                "USER-APPROVED MEMORIES:\n"
+                "The following information was explicitly saved "
+                "by the user. Use it when relevant:\n"
+                f"{memory_context}"
+            ),
+        })
+
+    # Add previous messages from the database
+    conversation_history.extend([
         {
             "role": message.role,
             "content": message.content,
         }
         for message in previous_messages
-    ]
-
+    ])
     # Add the current user message to the AI conversation history
     conversation_history.append({
-        "role": "user",
-        "content": request.message,
-    })
+            "role": "user",
+            "content": request.message,
+        })
 
-    # Generate a response using the configured AI provider
-    provider = None
+    # Check whether the user explicitly asked CLEO to remember something
+    memory_content = extract_explicit_memory_request(
+        request.message
+    )
 
-    try:
-        provider = create_ai_provider()
-
-        assistant_response = await provider.generate_response(
-            conversation_history
+    if memory_content:
+        # Save the user's memory
+        save_memory(
+            db=db,
+            category="general",
+            content=memory_content,
         )
 
-    except Exception:
-        db.rollback()
-
-        logger.exception(
-            "AI provider failed to generate a response"
+        assistant_response = (
+            f"I'll remember that: {memory_content}"
         )
 
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "CLEO's AI service is currently unavailable. "
-                "Please try again later."
-            ),
-        )
+    else:
+        
+        # Generate a response using the configured AI provider
+        provider = None
 
-    finally:
-        if provider is not None:
-            await provider.close()
+        try:
+            provider = create_ai_provider()
+
+            assistant_response = await provider.generate_response(
+                conversation_history
+            )
+
+        except Exception:
+            db.rollback()
+
+            logger.exception(
+                "AI provider failed to generate a response"
+            )
+
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "CLEO's AI service is currently unavailable. "
+                    "Please try again later."
+                ),
+            )
+
+        finally:
+            if provider is not None:
+                await provider.close()
 
         # Save the user's message
     user_message = Message(
@@ -411,6 +470,40 @@ async def list_conversations(
 
     return conversations
 
+# List all saved memories
+@app.get(
+    "/memories",
+    response_model=list[MemoryResponse],
+)
+async def list_memories(
+    db: Session = Depends(get_db),
+):
+    memories = get_all_memories(db)
+
+    return memories
+
+# Delete a saved memory
+@app.delete("/memories/{memory_id}")
+async def remove_memory(
+    memory_id: int,
+    db: Session = Depends(get_db),
+):
+    deleted = delete_memory(
+        db=db,
+        memory_id=memory_id,
+    )
+
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="Memory not found.",
+        )
+
+    return {
+        "assistant": "CLEO",
+        "message": "Memory deleted successfully.",
+        "memory_id": memory_id,
+    }
 
 
 # Retrieve one conversation and its messages
